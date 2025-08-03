@@ -6,10 +6,10 @@ from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from telegram.constants import ChatMemberStatus
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # آدرس Railway
-CHANNEL_IDS = ["@channel_1", "@channel_2"]
-ADMIN_IDS = [123456789, 987654321]
+WEBHOOK_URL = os.getenv("03ruc1a2.up.railway.app")  # آدرس Railway
+BOT_TOKEN = "8227817016:AAHL4vVYIAOBmBHun6iWhezZdyXSwJBjzY8"
+CHANNEL_IDS = ["@fcxter"]  # می‌توان چند کانال داد
+ADMIN_IDS = [6181430071, 5944937406]  # آیدی چند مدیر
 
 # اتصال به دیتابیس
 conn = sqlite3.connect("raffle.db", check_same_thread=False)
@@ -209,3 +209,4 @@ if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     telegram_app = loop.run_until_complete(init_telegram())
     flask_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+
