@@ -7,7 +7,6 @@ from telegram.constants import ChatMemberStatus
 BOT_TOKEN = "8227817016:AAHL4vVYIAOBmBHun6iWhezZdyXSwJBjzY8"
 CHANNEL_IDS = ["@fcxter"]  # می‌توان چند کانال داد
 ADMIN_IDS = [6181430071, 5944937406]  # آیدی چند مدیر
-
 # اتصال به دیتابیس
 conn = sqlite3.connect("raffle.db", check_same_thread=False)
 cursor = conn.cursor()
@@ -188,7 +187,7 @@ async def start_with_referral(update: Update, context: ContextTypes.DEFAULT_TYPE
                 await context.bot.send_message(ref_id, f"🎉 یک کاربر جدید با لینک شما وارد ربات شد!")
             except:
                 pass
-    await start(update, context)
+    await start(update, context)  # بعد از بررسی ریفرال، منو نشون داده میشه
 
 # اجرای ربات
 def main():
@@ -197,5 +196,5 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT, handle_message))
     app.run_polling()
 
-if __name__ == "__main__":
+if __name__ =="__main__":
     main()
