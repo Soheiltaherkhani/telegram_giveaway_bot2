@@ -1,212 +1,347 @@
 import os
 import sqlite3
 import random
-from flask import Flask, request
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
-from telegram.constants import ChatMemberStatus
+import requests
+from telegram import (
+    Update,
+    ReplyKeyboardMarkup,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    filters,
+    ContextTypes,
+)
 
-WEBHOOK_URL = os.getenv("03ruc1a2.up.railway.app")  # آدرس Railway
-BOT_TOKEN = "8227817016:AAHL4vVYIAOBmBHun6iWhezZdyXSwJBjzY8"
-CHANNEL_IDS = ["@fcxter"]  # می‌توان چند کانال داد
-ADMIN_IDS = [6181430071, 5944937406]  # آیدی چند مدیر
+# ————— تنظیمات —————
+# توکن را از متغیر محیطی بخوانید (توکن واقعی را اینجا قرار نده)
+BOT_TOKEN = ("8322293345:AAHQp4Lk57wc6KrT6rv9qTMkSMATST_O1XE")
+ADMIN_IDS = [6181430071, 5944937406]  # آیدی مدیرها
 
-# اتصال به دیتابیس
+# حذف وب‌هوک قبلی (در صورت نیاز)
+try:
+    if BOT_TOKEN:
+        requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook", timeout=5)
+except:
+    pass
+
+# ————— اتصال به دیتابیس —————
 conn = sqlite3.connect("raffle.db", check_same_thread=False)
 cursor = conn.cursor()
 
-cursor.execute("""CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY,
-    username TEXT,
-    points INTEGER DEFAULT 0,
-    chances INTEGER DEFAULT 0,
+# جدول کاربران
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    user_id       INTEGER PRIMARY KEY,
+    username      TEXT,
+    points        INTEGER DEFAULT 0,
+    chances       INTEGER DEFAULT 0,
     is_registered INTEGER DEFAULT 0
-)""")
+)
+""")
 
-cursor.execute("""CREATE TABLE IF NOT EXISTS raffle (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+# سعی می‌کنیم ستون referrer_id را اضافه کنیم اگر وجود نداشته باشد
+cursor.execute("PRAGMA table_info(users)")
+cols = [r[1] for r in cursor.fetchall()]
+if "referrer_id" not in cols:
+    try:
+        cursor.execute("ALTER TABLE users ADD COLUMN referrer_id INTEGER DEFAULT NULL")
+    except:
+        pass
+
+# جدول قرعه‌کشی
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS raffle (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER
-)""")
+)
+""")
+
+# جدول کانال‌های اجباری
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS channels (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE
+)
+""")
+
 conn.commit()
 
-# بررسی عضویت در کانال‌ها
-async def is_member(user_id, context: ContextTypes.DEFAULT_TYPE):
-    for channel in CHANNEL_IDS:
+# ————— منوها —————
+def main_menu():
+    return ReplyKeyboardMarkup(
+        [
+            ["💎 افزایش امتیاز", "👤 اطلاعات حساب"],
+            ["💳 تبدیل امتیاز به شانس", "🎰 ثبت نام در قرعه کشی"],
+        ],
+        resize_keyboard=True,
+    )
+
+def admin_menu():
+    return ReplyKeyboardMarkup(
+        [
+            ["🎯 انتخاب برنده", "📊 آمار"],
+            ["📢 ارسال پیام به همه", "📋 لیست کاربران"],
+            ["➕ افزودن کانال", "📋 لیست کانال‌های جوین اجباری"],
+            ["❌ حذف کانال جوین اجباری", "🔄 ریست قرعه‌کشی"],
+            ["🏆 لیدربورد کاربران"]
+        ],
+        resize_keyboard=True,
+    )
+
+# ————— بررسی عضویت در کانال‌های اجباری —————
+async def is_member(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    cursor.execute("SELECT username FROM channels")
+    rows = cursor.fetchall()
+    for (ch,) in rows:
         try:
-            member = await context.bot.get_chat_member(channel, user_id)
-            if member.status not in [ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
+            member = await context.bot.get_chat_member(ch, user_id)
+            if member.status not in ("member", "administrator", "creator"):
                 return False
         except:
             return False
     return True
 
-# بررسی مدیر بودن
-def is_admin(user_id):
-    return user_id in ADMIN_IDS
-
-# کیبوردها
-def main_menu():
-    return ReplyKeyboardMarkup([
-        [KeyboardButton("💎 افزایش امتیاز"), KeyboardButton("👤 اطلاعات حساب")],
-        [KeyboardButton("💳 تبدیل امتیاز به شانس")],
-        [KeyboardButton("🎰 ثبت نام در قرعه کشی")]
-    ], resize_keyboard=True)
-
-def admin_menu():
-    return ReplyKeyboardMarkup([
-        [KeyboardButton("🎯 انتخاب برنده"), KeyboardButton("👥 انتخاب چند برنده")],
-        [KeyboardButton("📢 ارسال پیام به همه"), KeyboardButton("📊 آمار")],
-        [KeyboardButton("🔄 ریست قرعه‌کشی")]
-    ], resize_keyboard=True)
-
-# شروع ربات
+# ————— هندلر /start —————
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    user_id = user.id
-    username = user.username or user.first_name
+    args = context.args
 
-    if not await is_member(user_id, context):
-        channels_list = "\n".join([f"🔗 {c}" for c in CHANNEL_IDS])
-        await update.message.reply_text(f"🔒 برای استفاده از ربات باید در کانال‌های زیر عضو شوید:\n\n{channels_list}")
-        return
-
-    cursor.execute("INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)", (user_id, username))
+    # ثبت اولیه کاربر
+    cursor.execute(
+        "INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)",
+        (user.id, user.username or None),
+    )
+    # بروزرسانی username در صورت تغییر
+    cursor.execute("UPDATE users SET username=? WHERE user_id=?", (user.username or None, user.id))
     conn.commit()
 
-    if is_admin(user_id):
-        await update.message.reply_text("📌 پنل مدیریت فعال شد!", reply_markup=admin_menu())
+    # سیستم رفرال با محدودیت سقف ۵۰ و فقط یک‌بار امتیاز دادن به ازای هر دعوت
+    if args:
+        try:
+            ref_id = int(args[0])
+            if ref_id != user.id:
+                # اگر username کاربر استارت‌کننده از قبل در جدول وجود دارد، امتیاز نده
+                user_has_username = False
+                if user.username:
+                    cursor.execute("SELECT user_id FROM users WHERE username=? AND user_id!=?", (user.username, user.id))
+                    if cursor.fetchone():
+                        user_has_username = True
+
+                if not user_has_username:
+                    # اگر این کاربر قبلاً referrer_id نداشته است، ثبتش کن و به رفرال امتیاز بده
+                    cursor.execute("SELECT referrer_id FROM users WHERE user_id=?", (user.id,))
+                    r = cursor.fetchone()
+                    ref_already = (r is not None and r[0] is not None)
+                    if not ref_already:
+                        cursor.execute("UPDATE users SET referrer_id=? WHERE user_id=?", (ref_id, user.id))
+                        # بررسی سقف 50: مجموع points + chances
+                        cursor.execute("SELECT COALESCE(points,0), COALESCE(chances,0) FROM users WHERE user_id=?", (ref_id,))
+                        ref_row = cursor.fetchone()
+                        if ref_row:
+                            pts, chs = ref_row
+                            if (pts + chs) < 50:
+                                cursor.execute("UPDATE users SET points = points + 1 WHERE user_id=?", (ref_id,))
+                                conn.commit()
+                                try:
+                                    await context.bot.send_message(ref_id, "🎉 با دعوت یک کاربر، ۱ امتیاز گرفتید!")
+                                except:
+                                    pass
+                            else:
+                                conn.commit()
+                        else:
+                            # اگر دعوت‌کننده در جدول نبود، فقط referrer_id ثبت می‌شود
+                            conn.commit()
+        except:
+            pass
+
+    # نمایش منو بر اساس نقش
+    if user.id in ADMIN_IDS:
+        await update.message.reply_text("👑 پنل مدیریت", reply_markup=admin_menu())
     else:
-        await update.message.reply_text("🎉 به ربات قرعه‌کشی خوش آمدید!", reply_markup=main_menu())
+        await update.message.reply_text("🎉 خوش آمدید!", reply_markup=main_menu())
 
-# مدیریت پیام‌ها
+# ————— هندلر پیام‌های متنی —————
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
-    user_id = update.effective_user.id
+    msg = update.message
+    text = msg.text or ""
+    uid = update.effective_user.id
 
-    if not is_admin(user_id):  # کاربر عادی
-        if text == "🎰 ثبت نام در قرعه کشی":
-            cursor.execute("UPDATE users SET is_registered = 1 WHERE user_id = ?", (user_id,))
-            cursor.execute("INSERT INTO raffle (user_id) VALUES (?)", (user_id,))
-            conn.commit()
-            await update.message.reply_text("✅ شما در قرعه‌کشی ثبت نام شدید!")
+    # === بخش مدیر ===
+    if uid in ADMIN_IDS:
 
-        elif text == "💎 افزایش امتیاز":
-            link = f"https://t.me/{context.bot.username}?start={user_id}"
-            await update.message.reply_text(f"🔗 لینک اختصاصی شما:\n{link}")
+        # آمار کلی
+        if text == "📊 آمار":
+            cursor.execute("SELECT COUNT(*) FROM users")
+            total = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM users WHERE is_registered=1")
+            reg = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM raffle")
+            chances = cursor.fetchone()[0]
+            await msg.reply_text(f"👥 کاربران: {total}\n✅ ثبت‌نام: {reg}\n🎟 شانس‌ها: {chances}")
 
-        elif text == "💳 تبدیل امتیاز به شانس":
-            cursor.execute("SELECT points FROM users WHERE user_id = ?", (user_id,))
-            row = cursor.fetchone()
-            points = row[0] if row else 0
-            if points > 0:
-                cursor.execute("UPDATE users SET points = 0, chances = chances + ? WHERE user_id = ?", (points, user_id))
-                for _ in range(points):
-                    cursor.execute("INSERT INTO raffle (user_id) VALUES (?)", (user_id,))
-                conn.commit()
-                await update.message.reply_text("✅ امتیازها به شانس تبدیل شد!")
-            else:await update.message.reply_text("⚠️ شما امتیازی برای تبدیل ندارید.")
-
-        elif text == "👤 اطلاعات حساب":
-            cursor.execute("SELECT points, chances, is_registered FROM users WHERE user_id = ?", (user_id,))
-            row = cursor.fetchone()
-            if row:
-                points, chances, registered = row
-                status = "بله" if registered else "خیر"
-                await update.message.reply_text(f"📊 اطلاعات حساب:\n\nثبت‌نام: {status}\nامتیاز: {points}\nشانس: {chances}")
-
-    else:  # مدیر
-        if text == "🎯 انتخاب برنده":
+        # انتخاب برنده
+        elif text == "🎯 انتخاب برنده":
             cursor.execute("SELECT user_id FROM raffle")
-            participants = [row[0] for row in cursor.fetchall()]
-            if not participants:
-                await update.message.reply_text("⚠️ هنوز کسی در قرعه‌کشی ثبت‌نام نکرده.")
-                return
-            winner_id = random.choice(participants)
-            cursor.execute("SELECT username FROM users WHERE user_id = ?", (winner_id,))
-            winner_username = cursor.fetchone()[0]
-            await update.message.reply_text(f"🎉 برنده قرعه‌کشی: @{winner_username}")
+            parts = [r[0] for r in cursor.fetchall()]
+            if not parts:
+                await msg.reply_text("⚠️ شرکت‌کننده‌ای نیست.")
+            else:
+                winner = random.choice(parts)
+                cursor.execute("SELECT username FROM users WHERE user_id=?", (winner,))
+                name = cursor.fetchone()[0] or str(winner)
+                await msg.reply_text(f"🏆 برنده: @{name}")
 
-        elif text == "👥 انتخاب چند برنده":
-            cursor.execute("SELECT user_id FROM raffle")
-            participants = [row[0] for row in cursor.fetchall()]
-            if not participants:
-                await update.message.reply_text("⚠️ هیچ شرکت‌کننده‌ای نیست.")
-                return
-            winners = random.sample(participants, min(3, len(participants)))
-            result = []
-            for w in winners:
-                cursor.execute("SELECT username FROM users WHERE user_id = ?", (w,))
-                result.append("@" + cursor.fetchone()[0])
-            await update.message.reply_text("🎯 برندگان:\n" + "\n".join(result))
-
+        # شروع حالت ارسال همگانی
         elif text == "📢 ارسال پیام به همه":
-            await update.message.reply_text("✍️ پیام خود را ارسال کنید:")
+            await msg.reply_text("📤 لطفاً پیام خود را (متن/عکس/ویدیو) ارسال کنید.")
             context.user_data["broadcast"] = True
 
-        elif text == "📊 آمار":
-            cursor.execute("SELECT COUNT(*) FROM users")
-            total_users = cursor.fetchone()[0]
+        # لیست کاربران
+        elif text == "📋 لیست کاربران":
+            rows = cursor.execute("SELECT username, user_id FROM users").fetchall()
+            lines = [f"@{u or 'ناشناس'} ({i})" for u, i in rows]
+            await msg.reply_text("👥 لیست کاربران:\n" + "\n".join(lines[:100]))
 
-            cursor.execute("SELECT COUNT(*) FROM users WHERE is_registered = 1")
-            registered_users = cursor.fetchone()[0]
+        # افزودن کانال
+        elif text == "➕ افزودن کانال":
+            await msg.reply_text("🔗 لطفاً یوزرنیم کانال را با @ ارسال کنید.")
+            context.user_data["add_ch"] = True
 
-            await update.message.reply_text(
-                f"📊 آمار کلی:\n\n👥 تعداد کاربران: {total_users}\n✅ ثبت‌نامی‌ها: {registered_users}"
-            )
+        elif context.user_data.get("add_ch"):
+            ch = text.strip()
+            if ch.startswith("@"):
+                cursor.execute("INSERT OR IGNORE INTO channels (username) VALUES (?)", (ch,))
+                conn.commit()
+                await msg.reply_text(f"✅ کانال {ch} اضافه شد.")
+            else:
+                await msg.reply_text("⚠️ یوزرنیم باید با @ شروع شود.")
+            context.user_data["add_ch"] = False
 
+        # لیست کانال‌های جوین اجباری
+        elif text == "📋 لیست کانال‌های جوین اجباری":
+            chs = [c[0] for c in cursor.execute("SELECT username FROM channels").fetchall()]
+            await msg.reply_text("📢 کانال‌های اجباری:\n" + ("\n".join(chs) or "—"))
+
+        # حذف کانال
+        elif text == "❌ حذف کانال جوین اجباری":
+            await msg.reply_text("🔗 لطفاً یوزرنیم کانال برای حذف را با @ ارسال کنید.")
+            context.user_data["del_ch"] = True
+
+        elif context.user_data.get("del_ch"):
+            ch = text.strip()
+            cursor.execute("DELETE FROM channels WHERE username=?", (ch,))
+            conn.commit()
+            await msg.reply_text(f"✅ اگر کانال {ch} وجود داشت، حذف شد.")
+            context.user_data["del_ch"] = False
+
+        # ریست قرعه‌کشی
         elif text == "🔄 ریست قرعه‌کشی":
             cursor.execute("DELETE FROM raffle")
+            cursor.execute("UPDATE users SET is_registered=0, chances=0")
             conn.commit()
-            await update.message.reply_text("✅ قرعه‌کشی ریست شد!")
+            await msg.reply_text("♻️ قرعه‌کشی ریست شد.")
 
-        elif context.user_data.get("broadcast"):
-            cursor.execute("SELECT user_id FROM users")
-            users = [row[0] for row in cursor.fetchall()]
-            for u in users:
-                try:
-                    await context.bot.send_message(u, text)
-                except:
-                    pass
-            context.user_data["broadcast"] = False
-            await update.message.reply_text("✅ پیام به همه ارسال شد!")
+        # لیدربورد کاربران
+        elif text == "🏆 لیدربورد کاربران":
+            top = cursor.execute(
+                "SELECT username, chances FROM users ORDER BY chances DESC LIMIT 10"
+            ).fetchall()
+            if top:
+                lines = [f"{i+1}. @{u or 'ناشناس'} - {c} شانس" for i, (u, c) in enumerate(top)]
+                await msg.reply_text("🏆 لیدربورد بر اساس شانس:\n" + "\n".join(lines))
+            else:
+                await msg.reply_text("⚠️ هیچ داده‌ای برای نمایش نیست.")
 
-# لینک دعوت
-async def start_with_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    new_user_id = update.effective_user.id
-    if len(context.args) > 0:
-        ref_id = int(context.args[0])
-        if ref_id != new_user_id:
-            cursor.execute("UPDATE users SET points = points + 1 WHERE user_id = ?", (ref_id,))
-            conn.commit()
+    # === بخش کاربر ===
+    else:
+
+        # بررسی عضویت
+        if not await is_member(uid, context):
+            chs = [c[0] for c in cursor.execute("SELECT username FROM channels")]
+            btns = [
+                [InlineKeyboardButton(f"عضویت در {c}", url=f"https://t.me/{c[1:]}")]
+                for c in chs
+            ]
+            await msg.reply_text("🔒 لطفاً عضو شوید:", reply_markup=InlineKeyboardMarkup(btns))
+            return
+
+        # ثبت‌نام در قرعه‌کشی
+        if text == "🎰 ثبت نام در قرعه کشی":
+            cursor.execute("SELECT is_registered FROM users WHERE user_id=?", (uid,))
+            reg = cursor.fetchone()[0]
+            if reg:
+                await msg.reply_text("✅ شما از قبل ثبت‌نام کرده‌اید.")
+            else:
+                cursor.execute(
+                    "UPDATE users SET is_registered=1, chances=chances+1 WHERE user_id=?",
+                    (uid,),
+                )
+                cursor.execute("INSERT INTO raffle (user_id) VALUES (?)", (uid,))
+                conn.commit()
+                await msg.reply_text("🎉 ثبت‌نام شما انجام شد.")
+
+        # افزایش امتیاز (لینک رفرال)
+        elif text == "💎 افزایش امتیاز":
+            link = f"https://t.me/{context.bot.username}?start={uid}"
+            await msg.reply_text("🔗 لینک دعوت شما:\n" + link)
+
+        # تبدیل امتیاز به شانس
+        elif text == "💳 تبدیل امتیاز به شانس":
+            pts = cursor.execute(
+                "SELECT points FROM users WHERE user_id=?", (uid,)
+            ).fetchone()[0]
+            if pts > 0:
+                cursor.execute(
+                    "UPDATE users SET chances=chances+?, points=0 WHERE user_id=?",
+                    (pts, uid),
+                )
+                for _ in range(pts):
+                    cursor.execute("INSERT INTO raffle (user_id) VALUES (?)", (uid,))
+                conn.commit()
+                await msg.reply_text(f"✅ {pts} امتیاز تبدیل شد.")
+            else:
+                await msg.reply_text("⚠️ شما امتیازی ندارید.")
+
+        # اطلاعات حساب
+        elif text == "👤 اطلاعات حساب":
+            u, pts, chs, reg = cursor.execute(
+                "SELECT username, points, chances, is_registered FROM users WHERE user_id=?",
+                (uid,),
+            ).fetchone()
+            st = "✅ ثبت‌نام شده" if reg else "❌ ثبت‌نام نشده"
+            await msg.reply_text(
+                f"👤 @{u}\n💎 امتیاز: {pts}\n🎟 شانس: {chs}\nوضعیت: {st}"
+            )
+
+# ————— هندلر ارسال رسانه در حالت همگانی —————
+async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    uid = msg.from_user.id
+
+    if uid in ADMIN_IDS and context.user_data.get("broadcast"):
+        users = cursor.execute("SELECT user_id FROM users").fetchall()
+        cnt = 0
+        for (u,) in users:
             try:
-                await context.bot.send_message(ref_id, f"🎉 یک کاربر جدید با لینک شما وارد ربات شد!")
+                if msg.photo:
+                    await context.bot.send_photo(u, photo=msg.photo[-1].file_id, caption=msg.caption or "")
+                elif msg.video:
+                    await context.bot.send_video(u, video=msg.video.file_id, caption=msg.caption or "")
+                cnt += 1
             except:
                 pass
-    await start(update, context)
+        await msg.reply_text(f"✅ پیام رسانه‌ای برای {cnt} نفر ارسال شد.")
+        context.user_data["broadcast"] = False
 
-# Flask app برای Webhook
-flask_app = Flask(__name__)
+# ————— اجرای ربات —————
+app = Application.builder().token(BOT_TOKEN).build()
+app.add_handler(CommandHandler("start", start))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, handle_media))
 
-from telegram.ext import Application
-
-async def init_telegram():
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start_with_referral))
-    app.add_handler(MessageHandler(filters.TEXT, handle_message))
-    await app.bot.set_webhook(url=f"{WEBHOOK_URL}/{BOT_TOKEN}")
-    return app
-
-telegram_app = None
-
-@flask_app.route(f"/{BOT_TOKEN}", methods=["POST"])
-def webhook():
-    update = Update.de_json(request.get_json(force=True), telegram_app.bot)
-    telegram_app.update_queue.put_nowait(update)
-    return "ok"
-
-if __name__ == "__main__":
-    import asyncio
-    loop = asyncio.get_event_loop()
-    telegram_app = loop.run_until_complete(init_telegram())
-    flask_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
-
+print("🤖 Bot is running...")
+app.run_polling()
